@@ -1,0 +1,784 @@
+// Water Distribution & Customer Financial Management System
+//
+// Conventions
+// - Money: Decimal(18,2). Quantities: Decimal(18,3). Prices: Decimal(18,4) (unit prices may have sub-cent precision).
+// - Business dates (txDate, saleDate, ...) are calendar days in the business timezone, stored as DATE.
+// - Status/type columns are strings validated in the application (src/lib/constants.ts). SQL Server has no
+//   enum type in Prisma; keeping them as strings also keeps the schema portable to PostgreSQL/MySQL.
+// - Posted financial rows (Invoice, Payment, CreditNote, LedgerEntry, StockMovement) are never updated in their
+//   amounts and never deleted. Corrections are new rows (cancellation, reversal, adjustment).
+// - All relations use NoAction: nothing is cascade-deleted (SQL Server also rejects multiple cascade paths).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlserver"
+}
+
+// ───────────────────────────── Security ─────────────────────────────
+
+model User {
+  id           Int       @id @default(autoincrement())
+  username     String    @unique @db.NVarChar(60)
+  fullName     String    @db.NVarChar(120)
+  email        String?   @db.NVarChar(160)
+  phone        String?   @db.NVarChar(40)
+  passwordHash String    @db.NVarChar(200)
+  isActive     Boolean   @default(true)
+  mustChangePassword Boolean @default(false)
+  failedLogins Int       @default(0)
+  lockedUntil  DateTime?
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  roles              UserRole[]
+  sessions           Session[]
+  invoicesCreated    Invoice[]     @relation("InvoiceCreatedBy")
+  paymentsCreated    Payment[]     @relation("PaymentCreatedBy")
+  creditNotesCreated CreditNote[]  @relation("CreditNoteCreatedBy")
+  ledgerCreated      LedgerEntry[] @relation("LedgerCreatedBy")
+  expensesCreated    Expense[]     @relation("ExpenseCreatedBy")
+  deliveriesAssigned Delivery[]    @relation("DeliveryAssignedTo")
+  auditLogs          AuditLog[]
+}
+
+model Role {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique @db.NVarChar(40)
+  name        String   @db.NVarChar(80)
+  description String?  @db.NVarChar(400)
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  permissions RolePermission[]
+  users       UserRole[]
+}
+
+model Permission {
+  id          Int    @id @default(autoincrement())
+  code        String @unique @db.NVarChar(80)
+  module      String @db.NVarChar(40)
+  description String @db.NVarChar(300)
+
+  roles RolePermission[]
+}
+
+model RolePermission {
+  roleId       Int
+  permissionId Int
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([roleId, permissionId])
+}
+
+model UserRole {
+  userId Int
+  roleId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  role   Role @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([userId, roleId])
+}
+
+model Session {
+  id         String    @id @db.NVarChar(64)
+  userId     Int
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  lastSeenAt DateTime  @default(now())
+  revokedAt  DateTime?
+  ip         String?   @db.NVarChar(64)
+  userAgent  String?   @db.NVarChar(300)
+  user       User      @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([userId])
+}
+
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  at         DateTime @default(now())
+  userId     Int?
+  action     String   @db.NVarChar(80)
+  entity     String   @db.NVarChar(60)
+  entityId   String?  @db.NVarChar(60)
+  summary    String?  @db.NVarChar(500)
+  before     String?  @db.NVarChar(Max)
+  after      String?  @db.NVarChar(Max)
+  ip         String?  @db.NVarChar(64)
+  user       User?    @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([entity, entityId])
+  @@index([at])
+  @@index([userId])
+}
+
+/// One-time keys for critical financial operations (double-click / retry protection).
+model IdempotencyKey {
+  key        String   @id @db.NVarChar(100)
+  operation  String   @db.NVarChar(40)
+  resultId   String   @db.NVarChar(60)
+  userId     Int?
+  createdAt  DateTime @default(now())
+}
+
+/// Gap-free document numbering (INV-2026-000001, RCPT-..., ...). Rows are locked with UPDATE inside the posting transaction.
+model DocumentSequence {
+  key       String @id @db.NVarChar(40)
+  nextValue Int    @default(1)
+}
+
+model BusinessSettings {
+  id              Int      @id @default(1)
+  companyName     String   @db.NVarChar(160)
+  tagline         String?  @db.NVarChar(200)
+  address         String?  @db.NVarChar(400)
+  phone           String?  @db.NVarChar(80)
+  email           String?  @db.NVarChar(160)
+  taxNumber       String?  @db.NVarChar(80)
+  logoDataUrl     String?  @db.NVarChar(Max)
+  currencyCode    String   @default("USD") @db.NVarChar(3)
+  currencySymbol  String   @default("$") @db.NVarChar(8)
+  timezone        String   @default("Africa/Mogadishu") @db.NVarChar(60)
+  invoicePrefix   String   @default("INV") @db.NVarChar(12)
+  receiptPrefix   String   @default("RCPT") @db.NVarChar(12)
+  creditNotePrefix String  @default("CN") @db.NVarChar(12)
+  paymentTermsDays Int     @default(30)
+  allowNegativeStock Boolean @default(false)
+  lowStockThreshold Decimal @default(50) @db.Decimal(18, 3)
+  invoiceFooter   String?  @db.NVarChar(600)
+  updatedAt       DateTime @updatedAt
+  updatedById     Int?
+}
+
+model PaymentMethod {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique @db.NVarChar(30)
+  name      String   @db.NVarChar(80)
+  kind      String   @db.NVarChar(20) // CASH | MOBILE | BANK | OTHER
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  payments Payment[]
+  expenses Expense[]
+  refunds  Refund[]
+}
+
+// ───────────────────────────── Locations & customers ─────────────────────────────
+
+/// Locally known places. Hierarchy: DISTRICT → NEIGHBORHOOD → PLACE (local name, landmark, building, ...).
+/// Names do not need to exist on official maps.
+model Location {
+  id          Int        @id @default(autoincrement())
+  kind        String     @db.NVarChar(20) // DISTRICT | NEIGHBORHOOD | PLACE
+  name        String     @db.NVarChar(120)
+  alsoKnownAs String?    @db.NVarChar(300)
+  description String?    @db.NVarChar(600)
+  parentId    Int?
+  latitude    Decimal?   @db.Decimal(10, 7)
+  longitude   Decimal?   @db.Decimal(10, 7)
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  parent      Location?  @relation("LocationTree", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children    Location[] @relation("LocationTree")
+  addressesAsDistrict     CustomerAddress[] @relation("AddrDistrict")
+  addressesAsNeighborhood CustomerAddress[] @relation("AddrNeighborhood")
+  addressesAsPlace        CustomerAddress[] @relation("AddrPlace")
+
+  @@unique([kind, parentId, name])
+  @@index([name])
+}
+
+model CustomerGroup {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique @db.NVarChar(30)
+  name        String   @db.NVarChar(100)
+  description String?  @db.NVarChar(300)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  customers Customer[]
+  prices    GroupProductPrice[]
+}
+
+model Customer {
+  id             Int       @id @default(autoincrement())
+  code           String    @unique @db.NVarChar(20) // CUS-000001
+  name           String    @db.NVarChar(160)
+  phone          String    @db.NVarChar(40)
+  altPhone       String?   @db.NVarChar(40)
+  customerType   String    @default("RESIDENTIAL") @db.NVarChar(30) // RESIDENTIAL | BUSINESS | OFFICE | INSTITUTION | RESELLER
+  groupId        Int?
+  status         String    @default("ACTIVE") @db.NVarChar(12) // ACTIVE | INACTIVE
+  registeredOn   DateTime  @db.Date
+  creditLimit    Decimal?  @db.Decimal(18, 2)
+  notes          String?   @db.NVarChar(1000)
+  /// Cached ledger balance (debit − credit). Always written in the same transaction as the ledger row; checked by reconciliation.
+  balance        Decimal   @default(0) @db.Decimal(18, 2)
+  /// Bumped by every financial posting; the UPDATE takes the row lock that serialises postings per customer.
+  lockVersion    Int       @default(0)
+  createdById    Int?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  group        CustomerGroup?         @relation(fields: [groupId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  addresses    CustomerAddress[]
+  prices       CustomerProductPrice[]
+  invoices     Invoice[]
+  payments     Payment[]
+  creditNotes  CreditNote[]
+  refunds      Refund[]
+  ledger       LedgerEntry[]
+  deliveries   Delivery[]
+  reminders    PaymentReminder[]
+
+  @@index([name])
+  @@index([phone])
+  @@index([altPhone])
+  @@index([status])
+}
+
+/// Every customer has their own full address record, even when several customers share a known place.
+model CustomerAddress {
+  id                  Int      @id @default(autoincrement())
+  customerId          Int
+  label               String   @default("Main") @db.NVarChar(60)
+  isPrimary           Boolean  @default(true)
+  localName           String   @db.NVarChar(200) // what local people call the place
+  officialAddress     String?  @db.NVarChar(300)
+  districtId          Int?
+  neighborhoodId      Int?
+  placeId             Int?
+  description         String?  @db.NVarChar(600)
+  deliveryInstructions String? @db.NVarChar(600)
+  latitude            Decimal? @db.Decimal(10, 7)
+  longitude           Decimal? @db.Decimal(10, 7)
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  customer     Customer  @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  district     Location? @relation("AddrDistrict", fields: [districtId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  neighborhood Location? @relation("AddrNeighborhood", fields: [neighborhoodId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  place        Location? @relation("AddrPlace", fields: [placeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  deliveries   Delivery[]
+
+  @@index([customerId])
+  @@index([localName])
+  @@index([neighborhoodId])
+  @@index([districtId])
+  @@index([placeId])
+}
+
+// ───────────────────────────── Products & pricing ─────────────────────────────
+
+model Product {
+  id            Int      @id @default(autoincrement())
+  code          String   @unique @db.NVarChar(30)
+  name          String   @db.NVarChar(120)
+  description   String?  @db.NVarChar(500)
+  capacity      Decimal  @db.Decimal(18, 3)
+  capacityUnit  String   @default("L") @db.NVarChar(12)  // L, ml, gal ...
+  saleUnit      String   @default("container") @db.NVarChar(30) // container, bottle, carton ...
+  /// Current default (list) price. Every change is also written to ProductPrice with an effective date.
+  defaultPrice  Decimal  @db.Decimal(18, 4)
+  costPrice     Decimal  @default(0) @db.Decimal(18, 4)
+  status        String   @default("ACTIVE") @db.NVarChar(12)
+  trackStock    Boolean  @default(true)
+  reorderLevel  Decimal  @default(0) @db.Decimal(18, 3)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  listPrices     ProductPrice[]
+  groupPrices    GroupProductPrice[]
+  customerPrices CustomerProductPrice[]
+  invoiceItems   InvoiceItem[]
+  creditItems    CreditNoteItem[]
+  stock          Inventory?
+  stockMoves     StockMovement[]
+  deliveryItems  DeliveryItem[]
+}
+
+/// Default price history with effective dates.
+model ProductPrice {
+  id            Int       @id @default(autoincrement())
+  productId     Int
+  price         Decimal   @db.Decimal(18, 4)
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date // exclusive; null = open ended
+  reason        String?   @db.NVarChar(300)
+  createdById   Int?
+  createdAt     DateTime  @default(now())
+  product       Product   @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([productId, effectiveFrom])
+}
+
+model GroupProductPrice {
+  id            Int           @id @default(autoincrement())
+  groupId       Int
+  productId     Int
+  price         Decimal       @db.Decimal(18, 4)
+  effectiveFrom DateTime      @db.Date
+  effectiveTo   DateTime?     @db.Date
+  isActive      Boolean       @default(true)
+  createdById   Int?
+  createdAt     DateTime      @default(now())
+  group         CustomerGroup @relation(fields: [groupId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  product       Product       @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([groupId, productId, effectiveFrom])
+}
+
+/// Customer-specific price. Rows are history: a change ends the current row (effectiveTo) and adds a new one.
+/// A temporary price is a row with an effectiveTo; while it is active it wins over the permanent row.
+model CustomerProductPrice {
+  id            Int       @id @default(autoincrement())
+  customerId    Int
+  productId     Int
+  price         Decimal   @db.Decimal(18, 4)
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date // exclusive
+  isTemporary   Boolean   @default(false)
+  isActive      Boolean   @default(true) // false = removed (kept for history)
+  reason        String?   @db.NVarChar(300)
+  createdById   Int?
+  createdAt     DateTime  @default(now())
+  endedById     Int?
+  endedAt       DateTime?
+  customer      Customer  @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  product       Product   @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([customerId, productId, effectiveFrom])
+  @@index([productId])
+}
+
+/// Human-readable log of every price change on any level (who, when, old → new).
+model PriceChangeLog {
+  id          Int      @id @default(autoincrement())
+  level       String   @db.NVarChar(12) // DEFAULT | GROUP | CUSTOMER
+  productId   Int
+  customerId  Int?
+  groupId     Int?
+  oldPrice    Decimal? @db.Decimal(18, 4)
+  newPrice    Decimal? @db.Decimal(18, 4)
+  effectiveFrom DateTime @db.Date
+  effectiveTo DateTime? @db.Date
+  action      String   @db.NVarChar(20) // SET | TEMPORARY | REMOVE | BULK
+  reason      String?  @db.NVarChar(300)
+  changedById Int?
+  changedAt   DateTime @default(now())
+
+  @@index([customerId, productId])
+  @@index([productId])
+  @@index([changedAt])
+}
+
+// ───────────────────────────── Receivables ─────────────────────────────
+
+/// Receivable document. kind SALE = normal sale; DEBIT_NOTE = extra charge / debit adjustment;
+/// OPENING_BALANCE = customer debt brought forward; REFUND = money paid back out of the customer's credit.
+model Invoice {
+  id             Int       @id @default(autoincrement())
+  number         String    @unique @db.NVarChar(30)
+  kind           String    @default("SALE") @db.NVarChar(20)
+  customerId     Int
+  addressId      Int?
+  invoiceDate    DateTime  @db.Date
+  dueDate        DateTime? @db.Date
+  status         String    @db.NVarChar(20) // UNPAID | PARTIALLY_PAID | PAID | CANCELLED   (OVERDUE is derived)
+  subtotal       Decimal   @default(0) @db.Decimal(18, 2)
+  discount       Decimal   @default(0) @db.Decimal(18, 2)
+  charges        Decimal   @default(0) @db.Decimal(18, 2)
+  total          Decimal   @db.Decimal(18, 2)
+  /// Sum of active allocations (payments + credit notes). Outstanding = total − amountSettled.
+  amountSettled  Decimal   @default(0) @db.Decimal(18, 2)
+  /// Cash taken at the time of sale (part of amountSettled). Used to split cash vs credit sales.
+  paidAtSale     Decimal   @default(0) @db.Decimal(18, 2)
+  /// Earlier advance credit applied at the moment of the sale (neither cash nor a new receivable).
+  creditAtSale   Decimal   @default(0) @db.Decimal(18, 2)
+  totalQuantity  Decimal   @default(0) @db.Decimal(18, 3)
+  relatedInvoiceId Int?
+  notes          String?   @db.NVarChar(1000)
+  // snapshot of customer data at posting time (invoice must print the same forever)
+  customerName   String    @db.NVarChar(160)
+  customerPhone  String?   @db.NVarChar(40)
+  addressText    String?   @db.NVarChar(600)
+  cancelledAt    DateTime?
+  cancelledById  Int?
+  cancelReason   String?   @db.NVarChar(400)
+  createdById    Int
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  lockVersion    Int       @default(0)
+
+  customer     Customer       @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdBy    User           @relation("InvoiceCreatedBy", fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  relatedInvoice Invoice?     @relation("InvoiceRelated", fields: [relatedInvoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  relatedDocs  Invoice[]      @relation("InvoiceRelated")
+  items        InvoiceItem[]
+  allocations  Allocation[]
+  creditNotes  CreditNote[]
+  delivery     Delivery?      @relation("DeliveryInvoice")
+  refund       Refund?
+  reminders    PaymentReminder[]
+
+  @@index([customerId, invoiceDate])
+  @@index([invoiceDate])
+  @@index([status])
+  @@index([kind])
+}
+
+model InvoiceItem {
+  id            Int      @id @default(autoincrement())
+  invoiceId     Int
+  lineNo        Int
+  productId     Int
+  // snapshot of the product at posting time
+  productCode   String   @db.NVarChar(30)
+  productName   String   @db.NVarChar(120)
+  capacity      Decimal  @db.Decimal(18, 3)
+  capacityUnit  String   @db.NVarChar(12)
+  saleUnit      String   @db.NVarChar(30)
+  quantity      Decimal  @db.Decimal(18, 3)
+  /// The price actually charged. Never recalculated.
+  unitPrice     Decimal  @db.Decimal(18, 4)
+  /// Price the engine resolved (before any manual override) and where it came from.
+  resolvedPrice Decimal  @db.Decimal(18, 4)
+  priceSource   String   @db.NVarChar(20) // CUSTOMER | CUSTOMER_TEMP | GROUP | DEFAULT | OVERRIDE
+  priceRefId    Int?
+  overrideReason String? @db.NVarChar(300)
+  lineTotal     Decimal  @db.Decimal(18, 2)
+  quantityReturned Decimal @default(0) @db.Decimal(18, 3)
+  unitCost      Decimal  @default(0) @db.Decimal(18, 4)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  product Product @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([invoiceId, lineNo])
+  @@index([productId])
+}
+
+// ───────────────────────────── Credits ─────────────────────────────
+
+model Payment {
+  id             Int       @id @default(autoincrement())
+  number         String    @unique @db.NVarChar(30) // receipt number
+  customerId     Int
+  paymentDate    DateTime  @db.Date
+  amount         Decimal   @db.Decimal(18, 2)
+  methodId       Int
+  reference      String?   @db.NVarChar(120)
+  notes          String?   @db.NVarChar(600)
+  /// Sum of active allocations. Unallocated (= customer advance credit) = amount − allocated.
+  allocated      Decimal   @default(0) @db.Decimal(18, 2)
+  /// Portion not applied to any open receivable when the payment was received (advance payment).
+  advanceAtReceipt Decimal @default(0) @db.Decimal(18, 2)
+  receivedAtSale Boolean   @default(false)
+  saleInvoiceId  Int?
+  status         String    @default("POSTED") @db.NVarChar(12) // POSTED | REVERSED
+  reversedAt     DateTime?
+  reversedById   Int?
+  reverseReason  String?   @db.NVarChar(400)
+  createdById    Int
+  createdAt      DateTime  @default(now())
+
+  customer    Customer      @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  method      PaymentMethod @relation(fields: [methodId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdBy   User          @relation("PaymentCreatedBy", fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  allocations Allocation[]
+
+  @@index([customerId, paymentDate])
+  @@index([paymentDate])
+  @@index([status])
+}
+
+/// Non-cash credit: product return, credit adjustment / price adjustment, opening credit balance.
+model CreditNote {
+  id          Int       @id @default(autoincrement())
+  number      String    @unique @db.NVarChar(30)
+  kind        String    @db.NVarChar(20) // RETURN | ADJUSTMENT | OPENING_BALANCE
+  customerId  Int
+  invoiceId   Int?
+  noteDate    DateTime  @db.Date
+  amount      Decimal   @db.Decimal(18, 2)
+  allocated   Decimal   @default(0) @db.Decimal(18, 2)
+  reason      String    @db.NVarChar(400)
+  status      String    @default("POSTED") @db.NVarChar(12)
+  createdById Int
+  createdAt   DateTime  @default(now())
+
+  customer    Customer         @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invoice     Invoice?         @relation(fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdBy   User             @relation("CreditNoteCreatedBy", fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  items       CreditNoteItem[]
+  allocations Allocation[]
+
+  @@index([customerId, noteDate])
+  @@index([noteDate])
+}
+
+model CreditNoteItem {
+  id            Int        @id @default(autoincrement())
+  creditNoteId  Int
+  invoiceItemId Int?
+  productId     Int
+  productName   String     @db.NVarChar(120)
+  quantity      Decimal    @db.Decimal(18, 3)
+  unitPrice     Decimal    @db.Decimal(18, 4)
+  lineTotal     Decimal    @db.Decimal(18, 2)
+  restock       Boolean    @default(true)
+  creditNote    CreditNote @relation(fields: [creditNoteId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  product       Product    @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([creditNoteId])
+}
+
+/// Links a credit (payment or credit note) to a receivable. Reversed allocations stay for traceability.
+model Allocation {
+  id           Int         @id @default(autoincrement())
+  invoiceId    Int
+  paymentId    Int?
+  creditNoteId Int?
+  amount       Decimal     @db.Decimal(18, 2)
+  allocatedOn  DateTime    @db.Date
+  createdById  Int?
+  createdAt    DateTime    @default(now())
+  reversedAt   DateTime?
+  reversedById Int?
+  reverseReason String?    @db.NVarChar(300)
+
+  invoice    Invoice     @relation(fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  payment    Payment?    @relation(fields: [paymentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  creditNote CreditNote? @relation(fields: [creditNoteId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([invoiceId])
+  @@index([paymentId])
+  @@index([creditNoteId])
+}
+
+model Refund {
+  id          Int           @id @default(autoincrement())
+  customerId  Int
+  invoiceId   Int           @unique // the REFUND receivable that consumes the customer's credit
+  refundDate  DateTime      @db.Date
+  amount      Decimal       @db.Decimal(18, 2)
+  methodId    Int
+  reference   String?       @db.NVarChar(120)
+  reason      String        @db.NVarChar(400)
+  createdById Int
+  createdAt   DateTime      @default(now())
+  customer    Customer      @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invoice     Invoice       @relation(fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  method      PaymentMethod @relation(fields: [methodId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([refundDate])
+}
+
+/// The customer financial ledger. Append-only. balanceAfter = previous balanceAfter + debit − credit.
+/// Positive balance = customer owes the business; negative = customer has advance credit.
+model LedgerEntry {
+  id           BigInt   @id @default(autoincrement())
+  customerId   Int
+  seq          Int      // 1, 2, 3 ... per customer
+  txDate       DateTime @db.Date
+  type         String   @db.NVarChar(30)
+  debit        Decimal  @default(0) @db.Decimal(18, 2)
+  credit       Decimal  @default(0) @db.Decimal(18, 2)
+  balanceAfter Decimal  @db.Decimal(18, 2)
+  reference    String   @db.NVarChar(40)
+  invoiceId    Int?
+  paymentId    Int?
+  creditNoteId Int?
+  refundId     Int?
+  description  String   @db.NVarChar(400)
+  createdById  Int
+  createdAt    DateTime @default(now())
+
+  customer  Customer @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdBy User     @relation("LedgerCreatedBy", fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([customerId, seq])
+  @@index([customerId, txDate])
+  @@index([txDate])
+  @@index([type])
+}
+
+// ───────────────────────────── Payment follow-up ─────────────────────────────
+
+/// "Call me later about the payment": a dated reminder to call a customer. Pops up in the portal when due.
+/// Closed automatically when the customer's balance is settled.
+model PaymentReminder {
+  id             Int       @id @default(autoincrement())
+  customerId     Int
+  invoiceId      Int?
+  remindAt       DateTime                                   // UTC instant (entered in business time)
+  expectedAmount Decimal?  @db.Decimal(18, 2)
+  note           String?   @db.NVarChar(600)
+  status         String    @default("OPEN") @db.NVarChar(12) // OPEN | DONE | CANCELLED
+  assignedToId   Int?
+  callCount      Int       @default(0)
+  lastCallAt     DateTime?
+  outcome        String?   @db.NVarChar(400)
+  closedAt       DateTime?
+  closedById     Int?
+  createdById    Int
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  customer Customer        @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invoice  Invoice?        @relation(fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  events   ReminderEvent[]
+
+  @@index([status, remindAt])
+  @@index([customerId])
+}
+
+model ReminderEvent {
+  id         Int       @id @default(autoincrement())
+  reminderId Int
+  action     String    @db.NVarChar(20) // CREATED | CALLED | RESCHEDULED | DONE | CANCELLED | AUTO_DONE
+  outcome    String?   @db.NVarChar(20) // NO_ANSWER | PROMISED | PAID | OTHER
+  note       String?   @db.NVarChar(600)
+  nextAt     DateTime?
+  userId     Int?
+  at         DateTime  @default(now())
+  reminder   PaymentReminder @relation(fields: [reminderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([reminderId])
+}
+
+// ───────────────────────────── Expenses ─────────────────────────────
+
+model ExpenseCategory {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique @db.NVarChar(80)
+  description String? @db.NVarChar(300)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  expenses  Expense[]
+}
+
+model Expense {
+  id          Int             @id @default(autoincrement())
+  number      String          @unique @db.NVarChar(30)
+  categoryId  Int
+  expenseDate DateTime        @db.Date
+  description String          @db.NVarChar(400)
+  amount      Decimal         @db.Decimal(18, 2)
+  methodId    Int
+  reference   String?         @db.NVarChar(120)
+  payee       String?         @db.NVarChar(160)
+  status      String          @default("POSTED") @db.NVarChar(12) // POSTED | VOID
+  voidedAt    DateTime?
+  voidedById  Int?
+  voidReason  String?         @db.NVarChar(300)
+  createdById Int
+  createdAt   DateTime        @default(now())
+
+  category  ExpenseCategory @relation(fields: [categoryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  method    PaymentMethod   @relation(fields: [methodId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdBy User            @relation("ExpenseCreatedBy", fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([expenseDate])
+  @@index([categoryId])
+}
+
+// ───────────────────────────── Inventory ─────────────────────────────
+
+model Inventory {
+  productId   Int      @id
+  onHand      Decimal  @default(0) @db.Decimal(18, 3)
+  lockVersion Int      @default(0)
+  updatedAt   DateTime @updatedAt
+  product     Product  @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model StockMovement {
+  id          BigInt   @id @default(autoincrement())
+  productId   Int
+  moveDate    DateTime @db.Date
+  type        String   @db.NVarChar(20) // OPENING | PRODUCTION | PURCHASE | SALE | RETURN | DAMAGE | ADJUSTMENT_IN | ADJUSTMENT_OUT | CANCEL_SALE
+  quantity    Decimal  @db.Decimal(18, 3) // signed: + into stock, − out of stock
+  balanceAfter Decimal @db.Decimal(18, 3)
+  unitCost    Decimal? @db.Decimal(18, 4)
+  reference   String   @db.NVarChar(40)
+  invoiceId   Int?
+  creditNoteId Int?
+  notes       String?  @db.NVarChar(400)
+  createdById Int
+  createdAt   DateTime @default(now())
+  product     Product  @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([productId, moveDate])
+  @@index([moveDate])
+  @@index([type])
+}
+
+// ───────────────────────────── Deliveries ─────────────────────────────
+
+model Delivery {
+  id            Int       @id @default(autoincrement())
+  number        String    @unique @db.NVarChar(30)
+  customerId    Int
+  addressId     Int?
+  /// Invoice this delivery fulfils. Unique: a delivery can never produce a second sale.
+  invoiceId     Int?      @unique
+  scheduledDate DateTime  @db.Date
+  status        String    @default("PENDING") @db.NVarChar(20) // PENDING | ASSIGNED | OUT_FOR_DELIVERY | DELIVERED | FAILED | CANCELLED
+  assignedToId  Int?
+  notes         String?   @db.NVarChar(600)
+  failureReason String?   @db.NVarChar(300)
+  deliveredAt   DateTime?
+  receivedBy    String?   @db.NVarChar(120)
+  confirmationNote String? @db.NVarChar(400)
+  addressText   String?   @db.NVarChar(600)
+  createdById   Int
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  customer   Customer         @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  address    CustomerAddress? @relation(fields: [addressId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invoice    Invoice?         @relation("DeliveryInvoice", fields: [invoiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  assignedTo User?            @relation("DeliveryAssignedTo", fields: [assignedToId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  items      DeliveryItem[]
+  events     DeliveryEvent[]
+
+  @@index([scheduledDate])
+  @@index([status])
+  @@index([assignedToId])
+  @@index([customerId])
+}
+
+model DeliveryItem {
+  id         Int      @id @default(autoincrement())
+  deliveryId Int
+  productId  Int
+  quantity   Decimal  @db.Decimal(18, 3)
+  delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  product    Product  @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([deliveryId])
+}
+
+model DeliveryEvent {
+  id         Int      @id @default(autoincrement())
+  deliveryId Int
+  fromStatus String?  @db.NVarChar(20)
+  toStatus   String   @db.NVarChar(20)
+  note       String?  @db.NVarChar(400)
+  userId     Int?
+  at         DateTime @default(now())
+  delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([deliveryId])
+}
