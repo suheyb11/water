@@ -291,7 +291,7 @@ export async function priceMatrix(opts: { q?: string; groupId?: number; onlySpec
   const where = {
     status: "ACTIVE",
     ...(opts.groupId ? { groupId: opts.groupId } : {}),
-    ...(opts.q ? { OR: [{ name: { contains: opts.q } }, { phone: { contains: opts.q } }, { code: { contains: opts.q } }] } : {}),
+    ...(opts.q ? { OR: [{ name: { contains: opts.q, mode: "insensitive" as const } }, { phone: { contains: opts.q, mode: "insensitive" as const } }, { code: { contains: opts.q, mode: "insensitive" as const } }] } : {}),
     ...(opts.onlySpecial ? { prices: { some: { isActive: true, ...covering(d) } } } : {}),
   };
   const [customers, total] = await Promise.all([

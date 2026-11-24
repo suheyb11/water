@@ -90,7 +90,7 @@ export async function updateProduct(actor: Actor, id: number, raw: ProductInput)
 
 export async function listProducts(opts: { status?: string; q?: string } = {}) {
   return prisma.product.findMany({
-    where: { ...(opts.status ? { status: opts.status } : {}), ...(opts.q ? { OR: [{ name: { contains: opts.q } }, { code: { contains: opts.q } }] } : {}) },
+    where: { ...(opts.status ? { status: opts.status } : {}), ...(opts.q ? { OR: [{ name: { contains: opts.q, mode: "insensitive" as const } }, { code: { contains: opts.q, mode: "insensitive" as const } }] } : {}) },
     include: { stock: true, _count: { select: { customerPrices: { where: { isActive: true } } } } },
     orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
   });

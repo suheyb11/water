@@ -131,7 +131,7 @@ export async function listDeliveries(opts: { status?: string; date?: string; fro
     ...(opts.status ? { status: opts.status } : {}),
     ...(opts.date ? { scheduledDate: dbDate(opts.date) } : opts.from && opts.to ? { scheduledDate: { gte: dbDate(opts.from), lte: dbDate(opts.to) } } : {}),
     ...(opts.assignedToId ? { assignedToId: opts.assignedToId } : {}),
-    ...(opts.q ? { OR: [{ number: { contains: opts.q } }, { customer: { name: { contains: opts.q } } }, { customer: { phone: { contains: opts.q } } }, { addressText: { contains: opts.q } }] } : {}),
+    ...(opts.q ? { OR: [{ number: { contains: opts.q, mode: "insensitive" as const } }, { customer: { name: { contains: opts.q, mode: "insensitive" as const } } }, { customer: { phone: { contains: opts.q, mode: "insensitive" as const } } }, { addressText: { contains: opts.q, mode: "insensitive" as const } }] } : {}),
   };
   const [rows, total] = await Promise.all([
     prisma.delivery.findMany({

@@ -21,7 +21,7 @@ export default async function SalesPage({ searchParams }: { searchParams: Promis
   const page = pageOf(sp.page);
   const where = {
     kind: "SALE", invoiceDate: { gte: dbDate(r.from), lte: dbDate(r.to) },
-    ...(sp.q ? { OR: [{ number: { contains: sp.q } }, { customerName: { contains: sp.q } }, { customerPhone: { contains: sp.q } }] } : {}),
+    ...(sp.q ? { OR: [{ number: { contains: sp.q, mode: "insensitive" as const } }, { customerName: { contains: sp.q, mode: "insensitive" as const } }, { customerPhone: { contains: sp.q, mode: "insensitive" as const } }] } : {}),
   };
   const [rows, total, all, s] = await Promise.all([
     prisma.invoice.findMany({ where, orderBy: [{ invoiceDate: "desc" }, { id: "desc" }], take: PAGE, skip: (page - 1) * PAGE, include: { items: { select: { productName: true, quantity: true } }, createdBy: { select: { fullName: true } } } }),

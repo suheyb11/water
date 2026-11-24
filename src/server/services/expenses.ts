@@ -74,7 +74,7 @@ export async function listExpenses(opts: { from: string; to: string; categoryId?
     expenseDate: { gte: dbDate(opts.from), lte: dbDate(opts.to) },
     ...(opts.categoryId ? { categoryId: opts.categoryId } : {}),
     ...(opts.includeVoid ? {} : { status: "POSTED" }),
-    ...(opts.q ? { OR: [{ description: { contains: opts.q } }, { number: { contains: opts.q } }, { payee: { contains: opts.q } }, { reference: { contains: opts.q } }] } : {}),
+    ...(opts.q ? { OR: [{ description: { contains: opts.q, mode: "insensitive" as const } }, { number: { contains: opts.q, mode: "insensitive" as const } }, { payee: { contains: opts.q, mode: "insensitive" as const } }, { reference: { contains: opts.q, mode: "insensitive" as const } }] } : {}),
   };
   const [rows, total, agg, byCat] = await Promise.all([
     prisma.expense.findMany({ where, orderBy: [{ expenseDate: "desc" }, { id: "desc" }], take: opts.take ?? 50, skip: opts.skip ?? 0, include: { category: true, method: true, createdBy: { select: { fullName: true } } } }),

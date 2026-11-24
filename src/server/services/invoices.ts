@@ -12,7 +12,7 @@ export async function listInvoices(opts: { q?: string; customerId?: number; stat
     ...(opts.kind ? { kind: opts.kind } : {}),
     ...(opts.customerId ? { customerId: opts.customerId } : {}),
     ...(opts.from && opts.to ? { invoiceDate: { gte: dbDate(opts.from), lte: dbDate(opts.to) } } : {}),
-    ...(opts.q ? { OR: [{ number: { contains: opts.q } }, { customerName: { contains: opts.q } }, { customerPhone: { contains: opts.q } }] } : {}),
+    ...(opts.q ? { OR: [{ number: { contains: opts.q, mode: "insensitive" as const } }, { customerName: { contains: opts.q, mode: "insensitive" as const } }, { customerPhone: { contains: opts.q, mode: "insensitive" as const } }] } : {}),
   };
   const [rows, total, agg] = await Promise.all([
     prisma.invoice.findMany({ where, orderBy: [{ invoiceDate: "desc" }, { id: "desc" }], take: opts.take ?? 25, skip: opts.skip ?? 0 }),
@@ -44,7 +44,7 @@ export async function listPayments(opts: { q?: string; customerId?: number; from
     ...(opts.customerId ? { customerId: opts.customerId } : {}),
     ...(opts.methodId ? { methodId: opts.methodId } : {}),
     ...(opts.from && opts.to ? { paymentDate: { gte: dbDate(opts.from), lte: dbDate(opts.to) } } : {}),
-    ...(opts.q ? { OR: [{ number: { contains: opts.q } }, { reference: { contains: opts.q } }, { customer: { name: { contains: opts.q } } }, { customer: { phone: { contains: opts.q } } }] } : {}),
+    ...(opts.q ? { OR: [{ number: { contains: opts.q, mode: "insensitive" as const } }, { reference: { contains: opts.q, mode: "insensitive" as const } }, { customer: { name: { contains: opts.q, mode: "insensitive" as const } } }, { customer: { phone: { contains: opts.q, mode: "insensitive" as const } } }] } : {}),
   };
   const [rows, total, agg] = await Promise.all([
     prisma.payment.findMany({ where, orderBy: [{ paymentDate: "desc" }, { id: "desc" }], take: opts.take ?? 25, skip: opts.skip ?? 0, include: { customer: { select: { id: true, name: true, code: true } }, method: true } }),

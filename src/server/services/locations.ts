@@ -50,7 +50,7 @@ export async function listLocations(opts: { kind?: string; q?: string; parentId?
       ...(opts.kind ? { kind: opts.kind } : {}),
       ...(opts.parentId ? { parentId: opts.parentId } : {}),
       ...(opts.activeOnly ? { isActive: true } : {}),
-      ...(opts.q ? { OR: [{ name: { contains: opts.q } }, { alsoKnownAs: { contains: opts.q } }, { description: { contains: opts.q } }] } : {}),
+      ...(opts.q ? { OR: [{ name: { contains: opts.q, mode: "insensitive" as const } }, { alsoKnownAs: { contains: opts.q, mode: "insensitive" as const } }, { description: { contains: opts.q, mode: "insensitive" as const } }] } : {}),
     },
     include: {
       parent: { select: { id: true, name: true, kind: true, parent: { select: { id: true, name: true } } } },

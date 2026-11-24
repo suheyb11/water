@@ -8,7 +8,7 @@ const nextConfig: NextConfig = {
     },
   },
   // database driver and PDF renderer stay plain Node modules on the server
-  serverExternalPackages: ["@prisma/adapter-mssql", "mssql", "tedious", "@react-pdf/renderer", "bcryptjs"],
+  serverExternalPackages: ["@prisma/adapter-pg", "pg", "@react-pdf/renderer", "bcryptjs"],
 };
 
 export default nextConfig;

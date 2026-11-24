@@ -5,48 +5,43 @@ customers with locally-known addresses, dynamic per-customer pricing, sales/invo
 customer ledger, statements, daily statements, expenses, stock, deliveries, users/roles and an audit log.
 
 **Stack:** Next.js 16 (App Router, Server Components + Server Actions) · React 19 · TypeScript · Tailwind CSS 4 ·
-shadcn-style UI (Radix) · Lucide · Recharts · Zod · Prisma 7 (driver adapter `@prisma/adapter-mssql`) ·
-Microsoft SQL Server 2022 Express · @react-pdf/renderer · Vitest.
+shadcn-style UI (Radix) · Lucide · Recharts · Zod · Prisma 7 (driver adapter `@prisma/adapter-pg`) ·
+PostgreSQL on Supabase · hosted on Vercel · @react-pdf/renderer · Vitest.
 
 ---
 
 ## 1. Quick start (this machine)
 
-Already done on DEV-1402-LPT: SQL Server 2022 Express (instance `SQLEXPRESS`, TCP 1433), databases `WaterPortal`
-and `WaterPortal_Test`, login `water_app`, migrations applied, reference data seeded. Passwords:
-`%USERPROFILE%\.water-portal\` (`sa.txt`, `app.txt`). First admin sign-in: `ADMIN-FIRST-LOGIN.txt` (delete after use).
+The database is the Supabase project **water** (PostgreSQL 17, region eu-west-1). `.env` already holds the
+connection strings; the migrations are applied and the reference data is seeded. First admin sign-in:
+`ADMIN-FIRST-LOGIN.txt` (delete after use).
 
 ```powershell
 cd C:\Users\Suhayb\Desktop\my-project\water-portal
 npm install            # also runs prisma generate
-npm run dev            # http://localhost:3000
+npm run dev            # http://localhost:3000 (uses the Supabase database)
 ```
 
-## 2. Setting up on a new machine
+## 2. Setting up from scratch
 
-1. Install Node.js 22+ and SQL Server 2022 (Express is enough) with **SQL authentication** and **TCP/IP enabled on
-   port 1433** (SQL Server Configuration Manager → Protocols → TCP/IP → IPAll → TCP Port 1433, restart the service).
-2. Create the databases and the application login (as `sa` or a Windows sysadmin):
-   ```sql
-   CREATE DATABASE WaterPortal;
-   CREATE DATABASE WaterPortal_Test;
-   ALTER DATABASE WaterPortal SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
-   ALTER DATABASE WaterPortal_Test SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
-   CREATE LOGIN water_app WITH PASSWORD = '<strong password>';
-   ALTER SERVER ROLE dbcreator ADD MEMBER water_app;   -- lets `prisma migrate dev` create its shadow database
-   USE WaterPortal;      CREATE USER water_app FOR LOGIN water_app; ALTER ROLE db_owner ADD MEMBER water_app;
-   USE WaterPortal_Test; CREATE USER water_app FOR LOGIN water_app; ALTER ROLE db_owner ADD MEMBER water_app;
-   ```
-3. `copy .env.example .env` and fill in the passwords and `AUTH_SECRET`.
-4. Install, migrate, seed, run:
+1. Create a Supabase project. **Connect → ORMs → Prisma** gives two URLs: the transaction pooler (port 6543) and
+   the session pooler (port 5432).
+2. `copy .env.example .env` and fill in `DATABASE_URL` (6543), `DIRECT_URL` (5432), `TEST_DATABASE_URL`
+   (5432 + `?schema=test`) and `AUTH_SECRET`. URL-encode special characters in the password (`@` → `%40`).
+3. Install, migrate, seed, run:
    ```powershell
    npm install
-   npm run db:deploy      # prisma migrate deploy + prisma generate
+   npm run db:deploy      # prisma migrate deploy (uses DIRECT_URL) + prisma generate
    npm run db:seed        # roles, permissions, payment methods, expense categories, 20 L product, first admin
    npm run dev
    ```
-   The seed prints where the first admin password was written (`ADMIN-FIRST-LOGIN.txt`). The admin must choose a
-   new password at first sign-in.
+   The seed writes the first admin password to `ADMIN-FIRST-LOGIN.txt`. The admin must choose a new password at
+   first sign-in.
+
+Security: Supabase exposes the `public` schema through its Data API. The integrity migration enables Row Level
+Security on every table with no policies and revokes all privileges from `anon`/`authenticated`, so the API keys
+can read nothing; the app connects through Prisma as the owner role. **A new table added in a later migration must
+also get `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`.**
 
 ## 3. Commands
 
@@ -54,7 +49,7 @@ npm run dev            # http://localhost:3000
 |---|---|
 | `npm run dev` | development server (port 3000) |
 | `npm run build` / `npm start` | production build / start (port 3000) |
-| `npm test` | 55 automated tests against `WaterPortal_Test` (the tests empty that database) |
+| `npm test` | automated tests against `TEST_DATABASE_URL` (schema `test` or a database `waterportal_test`; the tests empty it). Over the internet to Supabase they are slow (~200 ms per query); a local PostgreSQL is much faster |
 | `npm run typecheck` / `npm run lint` | TypeScript / ESLint |
 | `npm run db:migrate` | create + apply a migration after editing `prisma/schema.prisma` (development) |
 | `npm run db:deploy` | apply pending migrations (production) |
@@ -116,41 +111,26 @@ are editable per role under **Users & roles**. Every page, server action and PDF
 server. Sessions are server-side (httpOnly cookie, 12 h idle expiry, revoked on sign-out / password change / user
 disabled); 5 wrong passwords lock the account for 15 minutes; passwords are bcrypt-hashed.
 
-## 7. Production deployment (Windows server, same SQL Server)
+## 7. Production deployment (Vercel)
 
-```powershell
-git pull
-npm ci
-npm run db:deploy
-npm run build
-$env:NODE_ENV="production"; npm start          # or run under a service manager (NSSM / pm2-windows-service)
-```
-- Put it behind IIS (URL Rewrite + ARR) or nginx with HTTPS and set `COOKIE_SECURE="true"`.
-- Open only the web port in the firewall; keep SQL Server (1433) closed to the network.
-- Rotate the `sa` password and keep `sa` unused; the app uses `water_app` only.
+The GitHub repository `suheyb11/water` is imported into Vercel; every push to `main` deploys. Functions run in
+`dub1` (Dublin, next to the Supabase database; `vercel.json`).
+
+Vercel → Project → Settings → Environment Variables: `DATABASE_URL` (pooler 6543), `DIRECT_URL` (5432),
+`AUTH_SECRET`, `BUSINESS_TIMEZONE`, `COOKIE_SECURE="true"`.
+
+New migrations are applied from this machine before pushing the code that needs them: `npm run db:deploy`.
 
 ## 8. Backup and restore
 
-Backup (full, checksummed and verified; keeps the last 30):
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\backup.ps1 -Folder C:\Backups\WaterPortal
-```
-Schedule it daily in Task Scheduler and copy `C:\Backups\WaterPortal` to another disk or machine.
+Supabase takes daily backups (Project → Database → Backups; point-in-time recovery on paid plans). For an own copy:
+`pg_dump "<DIRECT_URL>" -Fc -f water-YYYYMMDD.dump`, restore with `pg_restore`. After a restore run
+**Financial reports → Run check**.
 
-Restore (stops the app first; replaces the database):
-```sql
-ALTER DATABASE WaterPortal SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
-RESTORE DATABASE WaterPortal FROM DISK = N'C:\Backups\WaterPortal\WaterPortal-YYYYMMDD-HHMMSS.bak' WITH REPLACE, CHECKSUM;
-ALTER DATABASE WaterPortal SET MULTI_USER;
-```
-After a restore run **Financial reports → Run check**.
+## 9. History
 
-## 9. Moving to another database later
-
-Business logic (`src/server/services`) uses only the Prisma API. To move to PostgreSQL: change `provider` in
-`prisma/schema.prisma`, swap `@prisma/adapter-mssql` for `@prisma/adapter-pg` in `src/server/db.ts`, create a fresh
-baseline migration, and port the SQL-Server-specific `integrity_constraints` migration (CHECKs + triggers) to
-PostgreSQL syntax. Then copy the data (e.g. export/import per table) and run the reconciliation check.
+The portal first ran on SQL Server 2022 Express. It moved to PostgreSQL (Supabase) on 2026-11-24 with a fresh
+baseline migration; the SQL Server migrations are in the git history.
 
 ## 10. Project layout
 
@@ -161,5 +141,4 @@ src/server/auth/*.ts                           sessions, passwords
 src/server/pdf/*.tsx                           invoice, receipt, statement, daily report PDFs (/api/pdf/…)
 src/app/(portal)/…                             pages; src/app/actions/*.ts server actions
 tests/*.test.ts                                Vitest suites (ledger scenarios, pricing, sales, reports, deliveries)
-scripts/backup.ps1                             database backup
 ```

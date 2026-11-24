@@ -19,7 +19,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
     at: { gte: new Date(dbDate(r.from).getTime() - 3 * 3600_000), lt: new Date(dbDate(addDays(r.to, 1)).getTime() - 3 * 3600_000) },
     ...(sp.user ? { userId: (idOf(sp.user) ?? -1) } : {}),
     ...(sp.entity ? { entity: sp.entity } : {}),
-    ...(sp.q ? { OR: [{ action: { contains: sp.q } }, { summary: { contains: sp.q } }, { entityId: sp.q }] } : {}),
+    ...(sp.q ? { OR: [{ action: { contains: sp.q, mode: "insensitive" as const } }, { summary: { contains: sp.q, mode: "insensitive" as const } }, { entityId: sp.q }] } : {}),
   };
   const [rows, total, users, entities] = await Promise.all([
     prisma.auditLog.findMany({ where, orderBy: { id: "desc" }, take: PAGE, skip: (page - 1) * PAGE, include: { user: { select: { fullName: true, username: true } } } }),

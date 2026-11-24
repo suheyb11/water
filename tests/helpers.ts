@@ -15,7 +15,10 @@ export async function resetDb() {
     "idempotencyKey", "documentSequence", "session", "userRole", "rolePermission", "role", "permission", "user", "businessSettings",
   ] as const;
   // append-only tables are protected by triggers against DELETE; the test database empties them with TRUNCATE
-  for (const t of ["LedgerEntry", "StockMovement", "AuditLog"]) await prisma.$executeRawUnsafe(`TRUNCATE TABLE [dbo].[${t}]`);
+  // schema-qualified: the Prisma adapter's `schema` option does not change search_path for raw SQL
+  const schema = new URL(process.env.DATABASE_URL!).searchParams.get("schema") ?? "public";
+  const tables = ["LedgerEntry", "StockMovement", "AuditLog"].map(t => `"${schema}"."${t}"`).join(", ");
+  await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${tables}`);
   for (const t of order) await (prisma as unknown as Record<string, { deleteMany: () => Promise<unknown> }>)[t].deleteMany();
   await seedBase(prisma);
 }

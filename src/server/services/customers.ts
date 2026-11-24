@@ -174,17 +174,17 @@ export function customerSearchWhere(q?: string) {
   const t = q.trim();
   return {
     OR: [
-      { name: { contains: t } },
-      { phone: { contains: t } },
-      { altPhone: { contains: t } },
-      { code: { contains: t } },
+      { name: { contains: t, mode: "insensitive" as const } },
+      { phone: { contains: t, mode: "insensitive" as const } },
+      { altPhone: { contains: t, mode: "insensitive" as const } },
+      { code: { contains: t, mode: "insensitive" as const } },
       { addresses: { some: { isActive: true, OR: [
-        { localName: { contains: t } },
-        { officialAddress: { contains: t } },
-        { description: { contains: t } },
-        { neighborhood: { name: { contains: t } } },
-        { district: { name: { contains: t } } },
-        { place: { OR: [{ name: { contains: t } }, { alsoKnownAs: { contains: t } }] } },
+        { localName: { contains: t, mode: "insensitive" as const } },
+        { officialAddress: { contains: t, mode: "insensitive" as const } },
+        { description: { contains: t, mode: "insensitive" as const } },
+        { neighborhood: { name: { contains: t, mode: "insensitive" as const } } },
+        { district: { name: { contains: t, mode: "insensitive" as const } } },
+        { place: { OR: [{ name: { contains: t, mode: "insensitive" as const } }, { alsoKnownAs: { contains: t, mode: "insensitive" as const } }] } },
       ] } } },
     ],
   };
