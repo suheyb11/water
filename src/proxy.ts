@@ -2,7 +2,7 @@
 // (session row, permissions) happens on the server for every page, action and PDF route.
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC = ["/login", "/unauthorized", "/_next", "/favicon.ico", "/icon"];
+const PUBLIC = ["/login", "/unauthorized", "/_next", "/favicon.ico", "/icon", "/api/health"];
 
 export function proxy(req: NextRequest) {
   const { pathname, search } = req.nextUrl;
